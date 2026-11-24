@@ -1,0 +1,36 @@
+{
+  "name": "@touchque/device-risk",
+  "version": "3.0.0",
+  "description": "Touchque Device Risk for the browser: recognise browsers on sign-in, sign-up and payment pages, tell bots, emulators and spoofed browsers apart; the script tag served at cdn.touchque.com/device",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Touchque/touchque-device-risk-web.git"
+  },
+  "homepage": "https://touchque.com",
+  "license": "MIT",
+  "author": "Touchque",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": { "types": "./dist/index.d.mts", "default": "./dist/index.mjs" },
+      "require": { "types": "./dist/index.d.ts", "default": "./dist/index.js" }
+    }
+  },
+  "files": ["dist", "CHANGELOG.md"],
+  "sideEffects": false,
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "keywords": ["touchque", "device-risk", "device-fingerprint", "bot-detection", "fraud", "browser"],
+  "devDependencies": {
+    "jsdom": "^25.0.1",
+    "tsup": "^8.0.2",
+    "typescript": "^5.4.5",
+    "vitest": "^2.1.4"
+  }
+}
