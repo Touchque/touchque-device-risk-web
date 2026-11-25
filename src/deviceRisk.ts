@@ -50,8 +50,13 @@ import { sealReport } from './envelope';
 export type DeviceRiskPurpose = 'sign_in' | 'sign_up' | 'password_reset' | 'approval';
 export const DEVICE_RISK_PURPOSES: readonly DeviceRiskPurpose[] = ['sign_in', 'sign_up', 'password_reset', 'approval'];
 
-/** The form field (or header) a report travels in from the browser to your server. */
+/** The form field a report travels in from the browser to your server. */
 export const DEVICE_RISK_FIELD = 'deviceRisk';
+/**
+ * The header guarded requests carry the page's Device risk identification in
+ * (`@touchque/web`'s `touchqueFetch` sends the tag's `TouchqueDevice.value()`).
+ * The server SDK one-liners read it after the `touchque_request_id` field.
+ */
 export const DEVICE_RISK_HEADER = 'X-Touchque-Device';
 
 /** Coarse traits. Raw here, never stored raw: the server keeps keyed hashes and coarse labels. */
@@ -121,6 +126,10 @@ export interface DeviceRiskBody {
   nonce: string;
   /** This browser's stored random id (`tq2_…`, shared with collectDeviceSignals), or null. */
   sid: string | null;
+  /** Touchque's fresh value the page asked for just before (3.1.0), when it got one. */
+  ch?: string;
+  /** The tag's version (3.1.0). */
+  tv?: string;
   t: DeviceRiskTraits;
   s: DeviceRiskFindings;
   /** Milliseconds the collection took. */
@@ -145,6 +154,8 @@ export interface DeviceRiskCollectOptions {
   timeoutMs?: number;
   /** Encrypt the report for Touchque (default). `false` sends the plain report (tests, debugging). */
   encrypt?: boolean;
+  /** Touchque's fresh value for this report (`identify` asks for it first; 3.1.0). */
+  challenge?: string | null;
 }
 
 export interface DeviceRiskIdentifyOptions extends DeviceRiskCollectOptions {
@@ -497,7 +508,9 @@ export function vmFindings(win: Window, gpu: string | null): string[] {
   try {
     const scr = win.screen;
     const desktop = !(nav.maxTouchPoints > 0);
-    if (desktop && scr && scr.width === 800 && scr.height === 600 && win.outerHeight === win.innerHeight && win.outerWidth === win.innerWidth) out.add('headless_window');
+    // Headless Chrome's default only: a Safari or Tor window may be 800x600 too.
+    const chromium = ['Chrome', 'Edge', 'Opera', 'Samsung'].includes(browserFamily(nav.userAgent || '').br) && !(nav as Navigator & { brave?: unknown }).brave;
+    if (desktop && chromium && scr && scr.width === 800 && scr.height === 600 && win.outerHeight === win.innerHeight && win.outerWidth === win.innerWidth) out.add('headless_window');
   } catch { /* ignore */ }
   return [...out].sort();
 }
@@ -602,13 +615,15 @@ export async function buildDeviceRiskReport(options: DeviceRiskCollectOptions, w
     iat: Math.floor(Date.now() / 1000),
     nonce: randomNonce(),
     sid: readOrCreateDeviceId(),
+    ...(typeof options.challenge === 'string' && options.challenge && { ch: options.challenge }),
+    tv: REPORT_TAG_VERSION,
     t: traits,
     s: {
       tamper: [...new Set([...tamperFindings(win), ...consistencyFindings(win, traits, fonts)])].sort(),
       vm: vmFindings(win, gpuRaw),
       auto: automationFindings(win),
       priv,
-      brave: typeof nav.brave === 'object' && nav.brave !== null,
+      brave: isBrave(win),
       cvNoise,
       storage: storageFindings(win),
     },
@@ -630,6 +645,21 @@ export async function buildDeviceRiskReport(options: DeviceRiskCollectOptions, w
   return report;
 }
 
+/** The tag's version, in every report (tv). */
+export const REPORT_TAG_VERSION = '3.1.0';
+
+/**
+ * Brave: its `navigator.brave` object, and on Chromium its own brand in the
+ * client hints (a page that only adds `navigator.brave` to get Brave's lighter
+ * matching is not Brave; the server checks the request's brands too).
+ */
+function isBrave(win: Window): boolean {
+  const nav = win.navigator as Navigator & { brave?: unknown; userAgentData?: { brands?: Array<{ brand: string }> } };
+  if (typeof nav.brave !== 'object' || nav.brave === null) return false;
+  const brands = nav.userAgentData?.brands;
+  return !Array.isArray(brands) || brands.length === 0 || brands.some((b) => /Brave/i.test(b.brand));
+}
+
 const SITE_KEY = /^tqpk_[A-Za-z0-9_-]{32}$/;
 const DEFAULT_API = 'https://api.touchque.com';
 
@@ -646,7 +676,17 @@ export function createDeviceRisk(win?: Window): DeviceRisk {
       const doFetch = (options.fetch ?? (typeof fetch !== 'undefined' ? fetch : undefined));
       if (!doFetch) throw new Error('deviceRisk.identify: no `fetch` available, pass `fetch` in the options.');
       try {
-        const report = await api.collect(options);
+        // Touchque's fresh value first (3.1.0): the report carries it, so it can't be built ahead
+        // of time or elsewhere. Without an answer in time the report goes without one.
+        const fresh = await within((async () => {
+          const r = await doFetch.call(globalThis, `${base}/device-risk/identify`, {
+            method: 'POST', headers: { 'Content-Type': 'text/plain' }, credentials: 'same-origin',
+            body: JSON.stringify({ siteKey: options.siteKey, challenge: true }),
+          });
+          const out = r.ok ? await r.json().catch(() => null) as { challenge?: unknown } | null : null;
+          return out && typeof out.challenge === 'string' ? out.challenge : null;
+        })().catch(() => null), options.timeoutMs ?? 1500, null);
+        const report = await api.collect({ ...options, challenge: fresh });
         // text/plain: a simple request, so no CORS preflight.
         const res = await doFetch.call(globalThis, `${base}/device-risk/identify`, {
           method: 'POST',

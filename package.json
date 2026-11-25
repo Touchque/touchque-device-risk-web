@@ -1,6 +1,6 @@
 {
   "name": "@touchque/device-risk",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Touchque Device Risk for the browser: recognise browsers on sign-in, sign-up and payment pages, tell bots, emulators and spoofed browsers apart; the script tag served at cdn.touchque.com/device",
   "repository": {
     "type": "git",

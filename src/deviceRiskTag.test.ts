@@ -170,7 +170,11 @@ describe('the Device risk script tag', () => {
     expect(installFromScript(script)).toBe(device);
     expect((window as Window & { TouchqueDevice?: TouchqueDevice }).TouchqueDevice).toBe(device);
     expect((await device.ready)?.requestId).toBe('dre_from_script_0000000');
-    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    // 3.1.0: first Touchque's fresh value, then the report.
+    const [askUrl, ask] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(askUrl).toBe('http://localhost:5001/device-risk/identify');
+    expect(JSON.parse(String(ask.body))).toEqual({ siteKey: SITE_KEY, challenge: true });
+    const [url, init] = fetchMock.mock.calls[1] as unknown as [string, RequestInit];
     expect(url).toBe('http://localhost:5001/device-risk/identify');
     expect(JSON.parse(String(init.body))).toMatchObject({ siteKey: SITE_KEY, view: true });
     vi.unstubAllGlobals();

@@ -41,7 +41,7 @@
 // too), sends no requestId: your server's check still answers, with
 // device_identification_missing, which only ever asks for a step-up.
 
-import { createDeviceRisk, DEVICE_RISK_PURPOSES } from './deviceRisk';
+import { createDeviceRisk, DEVICE_RISK_PURPOSES, REPORT_TAG_VERSION } from './deviceRisk';
 import type { DeviceRisk, DeviceRiskIdentification, DeviceRiskPurpose } from './deviceRisk';
 import { logWarn, errorText, setTouchqueLogger } from './log';
 import { startPointerSummary } from './pointerSummary';
@@ -59,7 +59,7 @@ export const DEVICE_EVENT = 'touchque:device';
 export const REFRESH_AFTER_MS = 10 * 60 * 1000;
 /** After a submit, a new identification for the next attempt (a single-page app). */
 export const AFTER_SUBMIT_MS = 1000;
-export const DEVICE_TAG_VERSION = '3.0.0';
+export const DEVICE_TAG_VERSION = REPORT_TAG_VERSION;
 
 export interface DeviceRiskTagOptions {
   /** Your workspace's public site key (`tqpk_…`, dashboard → Device risk → Settings). */

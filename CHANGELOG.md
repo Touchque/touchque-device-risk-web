@@ -3,6 +3,25 @@
 All notable changes to this project will be documented in this file. The
 format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.1.0] — 2026-11-25
+
+### Added
+- **Touchque's fresh value in every report.** `identify` (and so the script tag) first asks
+  `POST /device-risk/identify { siteKey, challenge: true }` for a value Touchque binds to the workspace, the site key
+  and the page's network (/24), good for two minutes and once; the report carries it (`ch`) inside what it signs and
+  encrypts. Reports can no longer be built ahead of time or asked for on one network and sent from another. Without an
+  answer within `timeoutMs` the report goes without one. `DeviceRiskCollectOptions.challenge` passes one to `collect`.
+- Every report names the tag's version (`tv`, `REPORT_TAG_VERSION`): Touchque counts a report without a value against it
+  only on a workspace whose pages have moved to 3.1, so pages still pinning 3.0 are never flagged.
+
+### Fixed
+- `headless_window` only on Chromium browsers (not Brave): an 800x600 frameless Safari or Tor window is not headless Chrome.
+- Brave is Brave only when its client-hint brands say so too: a page that just adds `navigator.brave` (Brave's lighter
+  matching) is not taken for it.
+
+### Changed
+- `DEVICE_TAG_VERSION` is `3.1.0`.
+
 ## [3.0.0] — 2026-11-24
 
 First release of `@touchque/device-risk`: Touchque Device Risk is a separate product with its own SDK. Its

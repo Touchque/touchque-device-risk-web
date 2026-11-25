@@ -167,10 +167,14 @@ describe('deviceRisk.identify', () => {
   const SITE_KEY = `tqpk_${'a'.repeat(32)}`;
 
   test('posts the report with the site key as text/plain and returns the identification', async () => {
-    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ visitorId: 'tqv_x', requestId: 'dre_y', confidence: 0.99 }) }) as never);
+    const fetchMock = vi.fn(async (_u: string, init: RequestInit) => (JSON.parse(String(init.body)).challenge
+      ? { ok: true, status: 200, json: async () => ({ challenge: 'ch1.1764064800.aaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbb' }) }
+      : { ok: true, status: 200, json: async () => ({ visitorId: 'tqv_x', requestId: 'dre_y', confidence: 0.99 }) }) as never);
     const out = await createDeviceRisk().identify({ siteKey: SITE_KEY, purpose: 'sign_up', browserKey: null, apiBaseUrl: 'https://api.example.com/', fetch: fetchMock as unknown as typeof fetch });
     expect(out).toEqual({ visitorId: 'tqv_x', requestId: 'dre_y', confidence: 0.99 });
-    const [url, init] = (fetchMock.mock.calls[0] as unknown) as [string, RequestInit];
+    // 3.1.0: Touchque's fresh value first, then the report that carries it.
+    expect(JSON.parse(String((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body))).toEqual({ siteKey: SITE_KEY, challenge: true });
+    const [url, init] = (fetchMock.mock.calls[1] as unknown) as [string, RequestInit];
     expect(url).toBe('https://api.example.com/device-risk/identify');
     expect((init.headers as Record<string, string>)['Content-Type']).toBe('text/plain');
     const sent = JSON.parse(init.body as string);
@@ -282,9 +286,18 @@ describe('traits that cannot all be true (anti-detect browsers, emulators, phone
   });
 
   test('headless Chrome with the automation flag hidden: its 800x600 frameless window', () => {
-    const win = { navigator: { userAgent: 'Mozilla/5.0 (Macintosh)', maxTouchPoints: 0, hardwareConcurrency: 8 }, screen: { width: 800, height: 600 }, outerWidth: 800, outerHeight: 600, innerWidth: 800, innerHeight: 600 } as unknown as Window;
+    const win = { navigator: { userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36', maxTouchPoints: 0, hardwareConcurrency: 8 }, screen: { width: 800, height: 600 }, outerWidth: 800, outerHeight: 600, innerWidth: 800, innerHeight: 600 } as unknown as Window;
     expect(vmFindings(win, 'Apple|Apple M5')).toContain('headless_window');
     const person = { ...win, screen: { width: 1512, height: 982 }, outerWidth: 1512, outerHeight: 944, innerWidth: 1512, innerHeight: 860 } as unknown as Window;
     expect(vmFindings(person, 'Apple|Apple M5')).not.toContain('headless_window');
   });
+
+  test('an 800x600 frameless Safari or Firefox window is not headless; the report carries the challenge and the tag version', async () => {
+    const safari = { navigator: { userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15', maxTouchPoints: 0, hardwareConcurrency: 8 }, screen: { width: 800, height: 600 }, outerWidth: 800, outerHeight: 600, innerWidth: 800, innerHeight: 600 } as unknown as Window;
+    expect(vmFindings(safari, 'Apple|Apple M5')).not.toContain('headless_window');
+    const plain = await createDeviceRisk().collect({ purpose: 'sign_in', browserKey: null, encrypt: false, challenge: 'ch1.1.x.y' });
+    const body = JSON.parse(JSON.parse(Buffer.from(plain, 'base64url').toString('utf8')).body);
+    expect(body).toMatchObject({ ch: 'ch1.1.x.y', tv: '3.1.0' });
+  });
 });
+
