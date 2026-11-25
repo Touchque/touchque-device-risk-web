@@ -45,6 +45,10 @@ import { browserKey as defaultBrowserKey } from './browserKey';
 import type { BrowserKey, DeviceSeal } from './browserKey';
 import { logWarn, errorText } from './log';
 import { sealReport } from './envelope';
+import { browserFamily, osFamily, CHROMIUM_FAMILIES } from './browserFamily';
+import { AGENT_CODES, onPageMarks, pageMarks, startAgentMarks } from './agentMarks';
+
+export { browserFamily, osFamily };
 
 /** The page the report is collected on. Device risk is for these pages only. */
 export type DeviceRiskPurpose = 'sign_in' | 'sign_up' | 'password_reset' | 'approval';
@@ -102,7 +106,14 @@ export interface DeviceRiskFindings {
   tamper: string[];
   /** A virtual machine, software graphics, a headless or automated browser. */
   vm: string[];
-  /** Which automation tool left its marks on the page (selenium, playwright, phantomjs, nightmare, headless_chrome), and cdp: the DevTools protocol is attached (a driver, or developer tools open). Since 2.3.0. */
+  /**
+   * Which automation tool left its marks on the page (selenium, playwright, puppeteer, phantomjs, nightmare,
+   * headless_chrome) and cdp: the DevTools protocol is attached (a driver, an AI agent, or developer tools open).
+   * Since 2.3.0. Since 3.2.0 also the AI agent driving the page (claude_agent, comet_agent, genspark_agent,
+   * browser_use, stagehand, skyvern) and input only software sends: cdp_input (a mouse press with no pressure),
+   * input_no_focus (a press or key into a page that is not focused), insert_text_bulk (text with no key pressed),
+   * scripted_click (a form sent with no press or key at all). Sorted.
+   */
   auto: string[];
   /** How a private window showed itself (chromium_quota, firefox_no_sw, safari_opfs), or null. */
   priv: string | null;
@@ -189,8 +200,20 @@ export interface DeviceRisk {
    * origin): `{ visitorId, requestId, confidence }`, or `null` (never throws)
    * when Touchque could not be reached or refused (the reason is logged to
    * the console). Send `requestId` to your server.
+   *
+   * Since 3.2.0 the identification keeps learning for 15 minutes: an AI agent
+   * reads a page before it acts, so its marks, clicks and typing come later.
+   * When the page sees one (agentMarks.ts), identify's page adds it to the
+   * identification (`POST /device-risk/identify { siteKey, requestId, late }`,
+   * codes only, at most 5 times), and your server's check weighs it.
    */
   identify(options: DeviceRiskIdentifyOptions): Promise<DeviceRiskIdentification | null>;
+  /**
+   * Sends what the page found since its identifications (late evidence) now,
+   * in a request that outlives the page, after checking for automation once
+   * more: the script tag calls it when a form is sent. Never throws.
+   */
+  flush(): void;
   /**
    * The encoded report (base64url JSON) for your server to pass to Touchque
    * as `deviceRisk` (the relay alternative to identify). Never throws; collects what it can.
@@ -226,29 +249,6 @@ function within<T>(work: Promise<T>, ms: number, fallback: T): Promise<T> {
     const timer = setTimeout(() => resolve(fallback), ms);
     work.then((v) => { clearTimeout(timer); resolve(v); }, () => { clearTimeout(timer); resolve(fallback); });
   });
-}
-
-// ── coarse labels ──────────────────────────────────────────────────────────
-
-export function osFamily(ua: string, platform: string): string {
-  if (/CrOS/.test(ua)) return 'ChromeOS';
-  if (/Android/i.test(ua)) return 'Android';
-  if (/iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && /Mobile\//.test(ua))) return 'iOS';
-  if (/Windows/.test(ua) || /^Win/.test(platform)) return 'Windows';
-  if (/Mac OS X|Macintosh/.test(ua) || /^Mac/.test(platform)) return 'macOS';
-  if (/Linux|X11/.test(ua) || /Linux/.test(platform)) return 'Linux';
-  return 'Other';
-}
-
-export function browserFamily(ua: string): { br: string; bv: number } {
-  const v = (re: RegExp) => { const m = re.exec(ua); return m ? Number(m[1]) || 0 : 0; };
-  if (/Edg(e|A|iOS)?\//.test(ua)) return { br: 'Edge', bv: v(/Edg(?:e|A|iOS)?\/(\d+)/) };
-  if (/OPR\/|Opera/.test(ua)) return { br: 'Opera', bv: v(/OPR\/(\d+)/) };
-  if (/SamsungBrowser\//.test(ua)) return { br: 'Samsung', bv: v(/SamsungBrowser\/(\d+)/) };
-  if (/Firefox\/|FxiOS\//.test(ua)) return { br: 'Firefox', bv: v(/(?:Firefox|FxiOS)\/(\d+)/) };
-  if (/Chrome\/|CriOS\//.test(ua)) return { br: 'Chrome', bv: v(/(?:Chrome|CriOS)\/(\d+)/) };
-  if (/Safari\//.test(ua) && /Version\//.test(ua)) return { br: 'Safari', bv: v(/Version\/(\d+)/) };
-  return { br: 'Other', bv: 0 };
 }
 
 // ── traits ──────────────────────────────────────────────────────────────────
@@ -516,12 +516,24 @@ export function vmFindings(win: Window, gpu: string | null): string[] {
 }
 
 /**
+ * Playwright's own globals: its bindings (__playwright__binding__, __playwright__binding__controller__),
+ * __pwInitScripts (1.48-1.52), the clock, WebSocket routes, WebAuthn, snapshots and the recorder's
+ * __pw_recorder*. Exact names, never a "__pw" prefix: on a sign-in page "pw" is often the password
+ * (a page's own __pwStrength or __pw_reset).
+ */
+const PLAYWRIGHT_GLOBAL = /^(?:__playwright|__pw(?:InitScripts|Clock|WebSocketBinding|WebAuthnBinding|SnapshotGlobals)$|__pw_recorder[A-Z])/;
+
+/**
  * The marks automation tools leave on a page: Selenium's ChromeDriver
- * variables and its helper functions, Playwright's bindings and init scripts,
- * PhantomJS, Nightmare, Chrome's headless user agent. `cdp`: the DevTools
- * protocol is attached (a console message read its error), which drivers do,
- * and so does a person with developer tools open: a hint, never proof.
- * Names only, sorted.
+ * variables and its helper functions; Playwright's bindings (exposeFunction,
+ * routeWebSocket, the clock, WebAuthn and the recorder: 1.53+ adds no global
+ * otherwise) and its older init scripts; Puppeteer's bindings and exposed
+ * functions, and its 800x600 viewport with the empty brands its
+ * setUserAgent leaves; a Puppeteer or Playwright evaluate on the stack;
+ * PhantomJS; Nightmare; Chrome's headless user agent or brand and its DOM
+ * automation globals. `cdp`: the DevTools protocol's Runtime domain is
+ * attached (cdpAttached), which drivers and AI agents do, and so does a
+ * person with developer tools open: a hint, never proof. Names only, sorted.
  */
 export function automationFindings(win: Window): string[] {
   const out = new Set<string>();
@@ -529,7 +541,12 @@ export function automationFindings(win: Window): string[] {
   const doc = win.document as unknown as Record<string, unknown>;
   const has = (o: Record<string, unknown>, k: string) => { try { return k in o; } catch { return false; } };
   try {
-    for (const k of Object.getOwnPropertyNames(win)) if (/^cdc_[A-Za-z0-9]{10,}/.test(k) || /^\$?wdc_/.test(k)) out.add('selenium');
+    for (const k of Object.getOwnPropertyNames(win)) {
+      if (/^cdc_[A-Za-z0-9]{10,}/.test(k) || /^\$?wdc_/.test(k)) out.add('selenium');
+      if (PLAYWRIGHT_GLOBAL.test(k)) out.add('playwright');
+      // The CDP binding behind every Puppeteer exposeFunction (puppeteer_<name>).
+      if (/^puppeteer_/.test(k)) out.add('puppeteer');
+    }
     for (const k of Object.keys(win.document)) if (/^\$?cdc_|^\$wdc_/.test(k)) out.add('selenium');
   } catch { /* ignore */ }
   for (const k of ['__selenium_unwrapped', '__selenium_evaluate', '__webdriver_evaluate', '__driver_evaluate', '__webdriver_unwrapped',
@@ -541,17 +558,183 @@ export function automationFindings(win: Window): string[] {
   for (const k of ['__playwright__binding__', '__pwInitScripts', '__playwright_evaluation_script__', '__playwright']) if (has(w, k)) out.add('playwright');
   for (const k of ['callPhantom', '_phantom']) if (has(w, k)) out.add('phantomjs');
   if (has(w, '__nightmare')) out.add('nightmare');
-  try { if (/HeadlessChrome/.test(win.navigator.userAgent || '')) out.add('headless_chrome'); } catch { /* ignore */ }
+  const nav = win.navigator as Navigator & { userAgentData?: { brands?: Array<{ brand?: unknown }> } };
+  try { if (/HeadlessChrome/.test(nav.userAgent || '')) out.add('headless_chrome'); } catch { /* ignore */ }
+  // Headless Chrome names itself in the brands too, and Chrome run for its own tests has DOM automation globals.
+  try { if ((nav.userAgentData?.brands || []).some((b) => /HeadlessChrome/.test(String(b?.brand)))) out.add('headless_chrome'); } catch { /* ignore */ }
+  if (has(w, 'domAutomation') || has(w, 'domAutomationController')) out.add('headless_chrome');
+  // Puppeteer's default viewport (800x600) with the empty brands page.setUserAgent leaves; a Chromium browser always names some.
   try {
-    // With the DevTools protocol's Runtime domain on, logging an error reads its stack.
-    let read = false;
-    const probe = new Error('');
-    Object.defineProperty(probe, 'stack', { configurable: true, get() { read = true; return ''; } });
-    // eslint-disable-next-line no-console
-    (win as Window & { console?: Console }).console?.debug?.(probe);
-    if (read) out.add('cdp');
+    const brands = nav.userAgentData?.brands;
+    if (CHROMIUM_FAMILIES.includes(browserFamily(nav.userAgent || '').br) && Array.isArray(brands) && brands.length === 0
+      && win.innerWidth === 800 && win.innerHeight === 600) out.add('puppeteer');
   } catch { /* ignore */ }
+  for (const code of stackTools(ownStack())) out.add(code);
+  // Through a fresh frame of the page: the source of functions the page's realm has and a blank one
+  // lacks (exposed functions), and the DevTools protocol, past the page's console wrappers.
+  const v8 = jsEngine() === 'v8';
+  withBlankFrame(win, (frame) => {
+    for (const code of exposedFunctionTools(win, frame)) out.add(code);
+    // Only while the frame's console is the browser's own: an extension's logger put into every frame
+    // could read the error itself (a false cdp) or swallow it.
+    if (v8 && isNative((frame as Window & { console?: Console }).console?.debug) && cdpAttached(frame)) out.add('cdp');
+  }, () => {
+    // No frame: the page's own console, only while nothing wraps it (a wrapper may read the error itself).
+    if (v8 && isNative((win as Window & { console?: Console }).console?.debug) && cdpAttached(win)) out.add('cdp');
+  });
   return [...out].sort();
+}
+
+/**
+ * This call's stack, deep enough to reach a driver's evaluate. Error.stackTraceLimit is V8's
+ * (default 10): raised for this one error and put back; other engines never get the property.
+ */
+function ownStack(): string {
+  const E = Error as ErrorConstructor & { stackTraceLimit?: number };
+  const limit = E.stackTraceLimit;
+  const raise = typeof limit === 'number' && limit < 50;
+  try {
+    if (raise) {
+      try { E.stackTraceLimit = 50; } catch { /* a frozen Error keeps its own limit */ }
+    }
+    return String(new Error('').stack || '');
+  } catch {
+    return '';
+  } finally {
+    if (raise) {
+      try { E.stackTraceLimit = limit; } catch { /* ignore */ }
+    }
+  }
+}
+
+/**
+ * A Puppeteer evaluate on the stack (its sourceURL pptr:, before v13
+ * __puppeteer_evaluation_script__) or a Playwright one (a UtilityScript method
+ * in code evaluated with no URL, or the old __playwright_evaluation_script__):
+ * the page's code was called by a driver (a click or a submit it made with
+ * script). A page's own class of that name runs from its script's URL.
+ */
+export function stackTools(stack: string): string[] {
+  const out: string[] = [];
+  if (/\bpptr:|__puppeteer_evaluation_script__/.test(stack)) out.push('puppeteer');
+  if (/\bUtilityScript\.[\w$]+ \((?![A-Za-z][\w+.-]*:\/\/)/.test(stack) || /__playwright_evaluation_script__/.test(stack)) out.push('playwright');
+  return out;
+}
+
+/**
+ * Functions the page has and a blank frame of it lacks, read with the blank
+ * frame's own Function.prototype.toString (a page's patched one cannot hide
+ * them): Puppeteer's exposeFunction wrapper says "This is the Puppeteer
+ * binding", Playwright's (1.59 and older) "exposeBindingHandle supports a
+ * single argument". Data properties only: no getter of the page is called.
+ */
+function exposedFunctionTools(win: Window, frame: Window): string[] {
+  const out = new Set<string>();
+  try {
+    const blank = new Set(Object.getOwnPropertyNames(frame));
+    const toSource = (frame as unknown as { Function: FunctionConstructor }).Function.prototype.toString;
+    let seen = 0;
+    for (const k of Object.getOwnPropertyNames(win)) {
+      if (blank.has(k)) continue;
+      seen += 1;
+      if (seen > 300) break;
+      let fn: unknown;
+      try { fn = Object.getOwnPropertyDescriptor(win, k)?.value; } catch { continue; }
+      if (typeof fn !== 'function') continue;
+      let source = '';
+      try { source = toSource.call(fn); } catch { continue; }
+      if (source.includes('This is the Puppeteer binding')) out.add('puppeteer');
+      if (source.includes('exposeBindingHandle supports a single argument')) out.add('playwright');
+    }
+  } catch { /* ignore */ }
+  return [...out];
+}
+
+/**
+ * Runs `work` with the window of a fresh same-origin about:blank frame of the
+ * page, then removes the frame (nothing of it stays); `none` when there is no
+ * DOM to put one in.
+ */
+function withBlankFrame(win: Window, work: (frame: Window) => void, none: () => void): void {
+  let el: HTMLIFrameElement | null = null;
+  let frame: Window | null = null;
+  try {
+    const doc = win.document;
+    const parent = doc.documentElement || doc.body;
+    if (parent) {
+      el = doc.createElement('iframe');
+      el.setAttribute('aria-hidden', 'true');
+      el.tabIndex = -1;
+      el.style.display = 'none';
+      parent.appendChild(el);
+      frame = el.contentWindow;
+    }
+  } catch {
+    frame = null;
+  }
+  try {
+    if (frame) work(frame);
+    else none();
+  } catch {
+    /* ignore */
+  } finally {
+    try { el?.remove(); } catch { /* ignore */ }
+  }
+}
+
+/**
+ * Is the DevTools protocol's Runtime domain attached (Selenium, Puppeteer,
+ * Playwright, CDP-driven AI agents such as the Claude app's browser, or
+ * developer tools open)? With it on, a logged error is formatted by the
+ * inspector: its stack is built (Error.prepareStackTrace runs) and its name is
+ * read more than the console alone reads it (once). Both probes log through
+ * `target`'s own console at the debug level (hidden by default) and leave
+ * Error.prepareStackTrace as it was. The tag passes a fresh blank frame's
+ * window, so the page's console wrappers (Sentry, Datadog, LogRocket) neither
+ * swallow nor trigger them. V8 only: the caller checks the engine.
+ */
+export function cdpAttached(target: Window): boolean {
+  const t = target as Window & { console?: Console; Error?: ErrorConstructor };
+  const con = t.console;
+  const debug = con?.debug;
+  const E = t.Error;
+  if (!con || typeof debug !== 'function' || typeof E !== 'function') return false;
+  // A: the inspector builds the logged error's stack, so Error.prepareStackTrace sees it.
+  try {
+    const d = Object.getOwnPropertyDescriptor(E, 'prepareStackTrace');
+    if (!d || d.configurable) {
+      const before: unknown = d && 'value' in d ? d.value : undefined;
+      let probe: unknown = null;
+      let built = false;
+      Object.defineProperty(E, 'prepareStackTrace', {
+        configurable: true,
+        writable: true,
+        value(err: unknown, frames: unknown[]) {
+          if (err === probe) { built = true; return ''; }
+          if (typeof before === 'function') return (before as (e: unknown, f: unknown[]) => unknown)(err, frames);
+          return [String(err), ...frames.map((f) => `    at ${String(f)}`)].join('\n');
+        },
+      });
+      try {
+        probe = new E('');
+        debug.call(con, probe);
+      } finally {
+        if (d) Object.defineProperty(E, 'prepareStackTrace', d);
+        else delete (E as ErrorConstructor & { prepareStackTrace?: unknown }).prepareStackTrace;
+      }
+      if (built) return true;
+    }
+  } catch { /* ignore */ }
+  // B: the console reads a logged error's name once; the inspector reads it again. Three rounds, more than 1.5 a log.
+  try {
+    let reads = 0;
+    class Probe extends E {}
+    Object.defineProperty(Probe.prototype, 'name', { configurable: true, get() { reads += 1; return 'Error'; } });
+    for (let i = 0; i < 3; i += 1) debug.call(con, new Probe(''));
+    return reads / 3 > 1.5;
+  } catch {
+    return false;
+  }
 }
 
 /** How a private window showed itself, where the browser lets that be seen (heuristic; null when not seen). */
@@ -593,6 +776,11 @@ function pageOrigin(win: Window): string {
 
 /** Builds the report. Never throws: every part fails soft. */
 export async function buildDeviceRiskReport(options: DeviceRiskCollectOptions, win: Window = window): Promise<DeviceRiskReport> {
+  return (await buildReport(options, win)).report;
+}
+
+/** The report and the body it carries (identify remembers the body's s.auto for late evidence). */
+async function buildReport(options: DeviceRiskCollectOptions, win: Window): Promise<{ report: DeviceRiskReport; body: DeviceRiskBody }> {
   const started = Date.now();
   const timeoutMs = options.timeoutMs ?? 1500;
   const purpose: DeviceRiskPurpose = DEVICE_RISK_PURPOSES.includes(options.purpose) ? options.purpose : 'sign_in';
@@ -621,7 +809,8 @@ export async function buildDeviceRiskReport(options: DeviceRiskCollectOptions, w
     s: {
       tamper: [...new Set([...tamperFindings(win), ...consistencyFindings(win, traits, fonts)])].sort(),
       vm: vmFindings(win, gpuRaw),
-      auto: automationFindings(win),
+      // Automation tools, and what the page watchers saw (AI agents, CDP input; 3.2.0).
+      auto: [...new Set([...automationFindings(win), ...pageMarks(win)])].sort(),
       priv,
       brave: isBrave(win),
       cvNoise,
@@ -642,11 +831,11 @@ export async function buildDeviceRiskReport(options: DeviceRiskCollectOptions, w
       }
     } catch { /* unsealed */ }
   }
-  return report;
+  return { report, body };
 }
 
 /** The tag's version, in every report (tv). */
-export const REPORT_TAG_VERSION = '3.1.0';
+export const REPORT_TAG_VERSION = '3.2.0';
 
 /**
  * Brave: its `navigator.brave` object, and on Chromium its own brand in the
@@ -663,8 +852,141 @@ function isBrave(win: Window): boolean {
 const SITE_KEY = /^tqpk_[A-Za-z0-9_-]{32}$/;
 const DEFAULT_API = 'https://api.touchque.com';
 
+/**
+ * What a page may add to its identification afterwards (late evidence, 3.2.0):
+ * the AI agent driving it, an automation tool, and the signs of software
+ * driving it. Touchque takes these codes and drops any other.
+ */
+export const LATE_EVIDENCE_CODES: readonly string[] = [...AGENT_CODES, 'selenium', 'playwright', 'puppeteer', 'phantomjs',
+  'nightmare', 'headless_chrome', 'cdp', 'cdp_input', 'input_no_focus', 'insert_text_bulk', 'scripted_click'];
+/** Late evidence updates per identification (Touchque takes no more). */
+export const LATE_MAX_UPDATES = 5;
+/** Touchque adds late evidence to an identification for 15 minutes. */
+const LATE_WINDOW_MS = 15 * 60 * 1000;
+/** New codes come in bursts (a click: cdp_input, then input_no_focus 100 ms later): one update for them. */
+const LATE_DEBOUNCE_MS = 300;
+/** Identifications a page keeps adding to: one per purpose, and the one before a refresh. */
+const LATE_KEEP = 4;
+
+interface LateTarget {
+  requestId: string;
+  siteKey: string;
+  base: string;
+  doFetch: typeof fetch;
+  at: number;
+  /** The codes Touchque has for it: its report's s.auto, and those sent since. */
+  sent: Set<string>;
+  updates: number;
+  /** Touchque refused it for good (not found, expired, another network, its updates used). */
+  closed: boolean;
+}
+
 export function createDeviceRisk(win?: Window): DeviceRisk {
   const target = () => win ?? window;
+  const late: LateTarget[] = [];
+  let lateTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** What the page found, of the late evidence codes (`full`: the automation checks too, as at a submit). */
+  const lateCodes = (full: boolean): string[] => {
+    const w = target();
+    const codes = new Set(pageMarks(w));
+    if (full) for (const c of automationFindings(w)) codes.add(c);
+    return [...codes].filter((c) => LATE_EVIDENCE_CODES.includes(c)).sort();
+  };
+  const live = () => {
+    const now = Date.now();
+    return late.filter((t) => !t.closed && t.updates < LATE_MAX_UPDATES && now - t.at < LATE_WINDOW_MS);
+  };
+  const sameOrigin = (base: string) => {
+    try { return new URL(base).origin === pageOrigin(target()); } catch { return false; }
+  };
+  /** One update with the codes `t` does not have yet. `outlive`: the page may be going away (a submit). */
+  const sendLate = (t: LateTarget, codes: string[], outlive: boolean) => {
+    const fresh = codes.filter((c) => !t.sent.has(c));
+    if (!fresh.length || t.closed || t.updates >= LATE_MAX_UPDATES) return;
+    t.updates += 1;
+    for (const c of fresh) t.sent.add(c);
+    const url = `${t.base}/device-risk/identify`;
+    const body = JSON.stringify({ siteKey: t.siteKey, requestId: t.requestId, late: { auto: fresh } });
+    const unsent = () => { for (const c of fresh) t.sent.delete(c); };
+    if (outlive && sameOrigin(t.base)) {
+      // To the page's own origin (a first-party /_tq/ proxy): a beacon, which outlives the page and
+      // carries the page's cookies, as identify does there.
+      try {
+        const nav = target().navigator as Navigator;
+        if (typeof nav.sendBeacon === 'function' && nav.sendBeacon(url, body)) return;
+      } catch { /* the fetch below */ }
+    }
+    // keepalive: it finishes after the page has gone. A beacon would always send cookies; like
+    // identify, nothing sends one to api.touchque.com.
+    Promise.resolve()
+      .then(() => t.doFetch.call(globalThis, url, {
+        method: 'POST', headers: { 'Content-Type': 'text/plain' }, body, credentials: 'same-origin', keepalive: true,
+      }))
+      .then(async (res) => {
+        const status = typeof res?.status === 'number' ? res.status : 0;
+        if (status >= 200 && status < 300) return;
+        let code = '';
+        if (status === 409) {
+          try { code = String(((await res.json()) as { code?: unknown } | null)?.code || ''); } catch { /* no body */ }
+        }
+        // Busy, or two updates at once: the codes go with the next one. Any other refusal is final.
+        if (status === 429 || status >= 500 || status === 0 || code === 'late_conflict') unsent();
+        else t.closed = true;
+      }, unsent)
+      .catch(() => { /* never an unhandled rejection on the page */ });
+  };
+  const sendPending = () => {
+    lateTimer = null;
+    const targets = live();
+    if (!targets.length) return;
+    const codes = lateCodes(false);
+    for (const t of targets) sendLate(t, codes, false);
+  };
+  const schedule = () => {
+    if (!late.length) return;
+    if (lateTimer) clearTimeout(lateTimer);
+    lateTimer = setTimeout(sendPending, LATE_DEBOUNCE_MS);
+  };
+  // The watchers start with Device risk on the page (once per window), so an agent's marks that
+  // come before the first identification are seen too.
+  const pageWin = win ?? (typeof window !== 'undefined' ? window : undefined);
+  if (pageWin) startAgentMarks(pageWin);
+  // An instance hears new codes once it has an identification to add them to (one that never
+  // identifies, such as the shared `deviceRisk` beside the tag's own, adds no listener).
+  let listening = false;
+  const remember = (t: LateTarget) => {
+    late.push(t);
+    while (late.length > LATE_KEEP) late.shift();
+    if (!listening && pageWin) {
+      listening = true;
+      onPageMarks(pageWin, schedule);
+    }
+    // What appeared while the report was on its way.
+    schedule();
+  };
+
+  /** The encoded report, and the s.auto it carries. */
+  const collectWith = async (options: DeviceRiskCollectOptions): Promise<{ encoded: string; auto: string[] }> => {
+    try {
+      const { report, body } = await buildReport(options, target());
+      let plain: DeviceRiskReport = report;
+      let encoded = encodeJson(plain);
+      if (encoded.length > MAX_ENCODED) {
+        // A long GPU name: cut it. The seal covers the whole body, so the cut report goes unsealed.
+        const cut = JSON.parse(report.body) as DeviceRiskBody;
+        cut.t.gpu = cut.t.gpu ? cut.t.gpu.slice(0, 48) : null;
+        plain = { v: 1, body: JSON.stringify(cut) };
+        encoded = encodeJson(plain);
+      }
+      // Encrypted for Touchque (envelope.ts); the plain report only without WebCrypto.
+      if (options.encrypt === false) return { encoded, auto: body.s.auto };
+      return { encoded: (await sealReport(JSON.stringify(plain))) || encoded, auto: body.s.auto };
+    } catch {
+      return { encoded: encodeJson({ v: 1, body: JSON.stringify({ v: 1, p: options.purpose, error: true }) }), auto: [] };
+    }
+  };
+
   const api: DeviceRisk = {
     report: (options) => buildDeviceRiskReport(options, target()),
     async identify(options) {
@@ -686,7 +1008,7 @@ export function createDeviceRisk(win?: Window): DeviceRisk {
           const out = r.ok ? await r.json().catch(() => null) as { challenge?: unknown } | null : null;
           return out && typeof out.challenge === 'string' ? out.challenge : null;
         })().catch(() => null), options.timeoutMs ?? 1500, null);
-        const report = await api.collect({ ...options, challenge: fresh });
+        const { encoded: report, auto } = await collectWith({ ...options, challenge: fresh });
         // text/plain: a simple request, so no CORS preflight.
         const res = await doFetch.call(globalThis, `${base}/device-risk/identify`, {
           method: 'POST',
@@ -701,30 +1023,30 @@ export function createDeviceRisk(win?: Window): DeviceRisk {
           logWarn(`Touchque deviceRisk.identify: ${out?.code || res.status}`);
           return null;
         }
+        // Late evidence (3.2.0): what the page finds from now on goes to this identification. Extra:
+        // it never costs the page the identification it got.
+        try {
+          remember({ requestId: out.requestId, siteKey: options.siteKey, base, doFetch, at: Date.now(), sent: new Set(auto), updates: 0, closed: false });
+        } catch { /* no late evidence for this one */ }
         return { visitorId: out.visitorId, requestId: out.requestId, confidence: typeof out.confidence === 'number' ? out.confidence : 0 };
       } catch (err) {
         logWarn(`Touchque deviceRisk.identify: Touchque could not be reached (${errorText(err)})`);
         return null;
       }
     },
-    async collect(options) {
+    flush() {
       try {
-        const report = await buildDeviceRiskReport(options, target());
-        let plain: DeviceRiskReport = report;
-        let encoded = encodeJson(plain);
-        if (encoded.length > MAX_ENCODED) {
-          // A long GPU name: cut it. The seal covers the whole body, so the cut report goes unsealed.
-          const body = JSON.parse(report.body) as DeviceRiskBody;
-          body.t.gpu = body.t.gpu ? body.t.gpu.slice(0, 48) : null;
-          plain = { v: 1, body: JSON.stringify(body) };
-          encoded = encodeJson(plain);
-        }
-        // Encrypted for Touchque (envelope.ts); the plain report only without WebCrypto.
-        if (options.encrypt === false) return encoded;
-        return (await sealReport(JSON.stringify(plain))) || encoded;
-      } catch {
-        return encodeJson({ v: 1, body: JSON.stringify({ v: 1, p: options.purpose, error: true }) });
-      }
+        if (lateTimer) clearTimeout(lateTimer);
+        lateTimer = null;
+        const targets = live();
+        if (!targets.length) return;
+        // At a submit the automation checks run again too: a driver or an agent may have attached since.
+        const codes = lateCodes(true);
+        for (const t of targets) sendLate(t, codes, true);
+      } catch { /* never break the page's submit */ }
+    },
+    async collect(options) {
+      return (await collectWith(options)).encoded;
     },
   };
   return api;

@@ -29,6 +29,13 @@
 // most; the dashboard names the kind of bot). `data-pointer="off"` on the
 // tag leaves both out.
 //
+// Since 3.2.0 the field keeps its format, and what the page finds after the
+// identification goes to Touchque on its own (late evidence: an AI agent's
+// marks, CDP clicks and typing; agentMarks.ts): while the page is open, and
+// once more when a form is sent (deviceRisk.flush). A form sent with no press,
+// tap or key from the person since the page loaded was sent by a script
+// (scripted_click).
+//
 // Single-page apps read `window.TouchqueDevice`: `ready` (the first
 // identification, or null), `value()` (what to send now: the requestId and
 // the pointer summary), `requestId`, `refresh()`, and the `touchque:device`
@@ -48,6 +55,7 @@ import { startPointerSummary } from './pointerSummary';
 import type { PointerSummaryProbe } from './pointerSummary';
 import { startInputSummary } from './inputSummary';
 import type { InputSummaryProbe } from './inputSummary';
+import { addPageMark, startAgentMarks, trustedInputSeen } from './agentMarks';
 
 /** The hidden form field the tag fills; your server passes it to deviceRisk.check. */
 export const REQUEST_ID_FIELD = 'touchque_request_id';
@@ -100,7 +108,7 @@ interface Slot {
 
 export interface DeviceRiskTagDeps {
   win?: Window;
-  deviceRisk?: Pick<DeviceRisk, 'identify'>;
+  deviceRisk?: Pick<DeviceRisk, 'identify'> & Partial<Pick<DeviceRisk, 'flush'>>;
   now?: () => number;
   pointer?: PointerSummaryProbe | null;
   input?: InputSummaryProbe | null;
@@ -114,6 +122,8 @@ export function installDeviceRiskTag(options: DeviceRiskTagOptions, deps: Device
   const doc = win.document;
   const now = deps.now ?? (() => Date.now());
   const risk = deps.deviceRisk ?? createDeviceRisk(win);
+  // Watching for AI agents and CDP input (createDeviceRisk starts it too; once per window).
+  startAgentMarks(win);
   const pagePurpose: DeviceRiskPurpose = isPurpose(options.purpose) ? options.purpose : 'sign_in';
   const slots = new Map<DeviceRiskPurpose, Slot>();
   const roots = new Set<ParentNode>([doc]);
@@ -225,6 +235,10 @@ export function installDeviceRiskTag(options: DeviceRiskTagOptions, deps: Device
     // Before the browser reads the form (this listener runs first, on capture).
     const value = valueOf(purpose);
     if (value) fieldOf(form).value = value;
+    // No press, tap or key from the person since the page loaded: a script sent this form (3.2.0).
+    try { if (!trustedInputSeen(win)) addPageMark(win, 'scripted_click'); } catch { /* ignore */ }
+    // What the page found since the identification goes now, before the page may go away.
+    try { risk.flush?.(); } catch { /* ignore */ }
     // The submitted form already holds its value; the next attempt gets a new one.
     setTimeout(() => { if (!stopped) void identifyFor(purpose); }, AFTER_SUBMIT_MS);
   };

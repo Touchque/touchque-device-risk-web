@@ -5,7 +5,11 @@
  * and the same functions as a library. Reports are signed by this browser's
  * device-bound key and encrypted so only Touchque reads them.
  */
-export { deviceRisk, createDeviceRisk, buildDeviceRiskReport, DEVICE_RISK_FIELD, DEVICE_RISK_HEADER, DEVICE_RISK_PURPOSES, consistencyFindings, jsEngine } from './deviceRisk';
+export {
+  deviceRisk, createDeviceRisk, buildDeviceRiskReport, DEVICE_RISK_FIELD, DEVICE_RISK_HEADER, DEVICE_RISK_PURPOSES, consistencyFindings, jsEngine,
+  LATE_EVIDENCE_CODES,
+} from './deviceRisk';
+export { pageMarks, onPageMarks } from './agentMarks';
 export type {
   DeviceRisk, DeviceRiskPurpose, DeviceRiskReport, DeviceRiskBody, DeviceRiskTraits, DeviceRiskFindings, DeviceRiskCollectOptions,
   DeviceRiskIdentifyOptions, DeviceRiskIdentification,

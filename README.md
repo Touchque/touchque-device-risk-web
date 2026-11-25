@@ -24,11 +24,19 @@ against what it saw before. Without WebCrypto (an http page) the report goes une
 
 ## What it catches
 
-Besides the visitor ID: automation (WebDriver, headless Chrome, Playwright, Puppeteer, Selenium marks),
-Android emulators, virtual machines and software graphics, and traits that cannot all be true
+Besides the visitor ID: automation (WebDriver, headless Chrome, Playwright, Puppeteer, Selenium marks, the DevTools
+protocol attached), Android emulators, virtual machines and software graphics, and traits that cannot all be true
 (`consistencyFindings`): a JavaScript engine that is not the claimed browser's, graphics or fonts of
 another platform, a "phone" with no touch or a desktop screen. How the pointer moved and how the page was
 typed into travel as short summaries (counts and milliseconds, never a key or a position).
+
+Since 3.2.0, AI agents that drive the browser: the Claude app's browser and Claude in Chrome, Perplexity Comet,
+Genspark, Browser Use, Stagehand and Skyvern by the marks they leave on the page, and input only software sends (a
+mouse press with no pressure, a press or key into a page that is not focused, text that arrives whole with no key, a
+form sent with no press or key at all). The focus and whole-text checks run on desktops only: a phone's keyboard puts
+whole words and one-time codes in with no key. An agent reads a page before it acts, so these often come after the
+identification made on load: the page adds them to it for 15 minutes (codes only, at most 5 updates, and once more
+when a form is sent), and your server's check weighs them.
 
 ## Install on a page
 A paid add-on, off until your workspace turns it on (dashboard → Device risk). Every browser that reaches one of
@@ -246,8 +254,8 @@ sign-in and approval pages. An identification serves one account for 15 minutes;
   CPU cores, memory class, touch points, the graphics card's name) and short hashes of how the browser draws a
   test text, plays a test sound, which of 25 common fonts it has, a few Math results and its WebGL limits. And
   findings: browser functions replaced by script, traits that contradict each other (an anti-detect browser or
-  a spoofing extension), a virtual machine or software graphics, a headless or automated browser, and a private
-  window where the browser lets that be seen.
+  a spoofing extension), a virtual machine or software graphics, a headless or automated browser, an AI agent's
+  marks and input only software sends (codes only), and a private window where the browser lets that be seen.
 - **Sealed:** where the browser has a device-bound key (`browserKey`, the silent sign-in key), the report is
   signed with it (`touchque-device:v1`, a different message from a proof's). Touchque then knows it came whole
   from a browser holding that key, from your page's origin, once. A seal does not make the traits true: script

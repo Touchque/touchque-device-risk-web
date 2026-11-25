@@ -3,10 +3,12 @@ import { createHash, verify, webcrypto } from 'node:crypto';
 import { createBrowserKey, deviceSealMessage, type BrowserKeyStore } from './browserKey';
 import {
   buildDeviceRiskReport, createDeviceRisk, osFamily, browserFamily, tamperFindings, vmFindings, automationFindings, consistencyFindings, jsEngine,
+  cdpAttached, stackTools, LATE_MAX_UPDATES,
   type DeviceRiskBody, type DeviceRiskReport,
 } from './deviceRisk';
 import { sealReport } from './envelope';
 import { REPORT_KEY } from './reportKey';
+import { addPageMark, startAgentMarks, stopAgentMarks } from './agentMarks';
 
 const ORIGIN = 'https://app.example.com';
 
@@ -240,6 +242,217 @@ describe('automation tools on the page (2.3.0)', () => {
   });
 });
 
+describe('automation and AI agents on the page (3.2.0)', () => {
+  const w = window as unknown as Record<string, unknown>;
+  const added = ['puppeteer_exposedSum', 'exposedSum', '__playwright__binding__controller__', '__pwClock', 'exposedPw', 'domAutomationController', '__claudeElementMap',
+    '__pwStrength', '__pw_reset', '__pw_recorderState'];
+  const tools = () => automationFindings(window).filter((c) => c !== 'cdp');
+  afterEach(() => {
+    for (const k of added) delete w[k];
+    for (const k of ['userAgentData', 'innerWidth', 'innerHeight']) delete (k === 'userAgentData' ? navigator as unknown as Record<string, unknown> : w)[k];
+    stopAgentMarks(window);
+  });
+
+  test('Puppeteer: its exposeFunction binding and wrapper', () => {
+    expect(tools()).toEqual([]);
+    w.puppeteer_exposedSum = () => {};
+    expect(tools()).toEqual(['puppeteer']);
+    delete w.puppeteer_exposedSum;
+    // The wrapper alone (a renamed binding): its source, read with a blank frame's own toString.
+    w.exposedSum = function exposedSum() { return 'This is the Puppeteer binding.'; };
+    expect(tools()).toEqual(['puppeteer']);
+  });
+
+  test("Puppeteer's 800x600 viewport with the empty brands its setUserAgent leaves; a real Chrome names brands", () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36');
+    Object.defineProperty(window, 'innerWidth', { value: 800, configurable: true });
+    Object.defineProperty(window, 'innerHeight', { value: 600, configurable: true });
+    Object.defineProperty(navigator, 'userAgentData', { value: { brands: [{ brand: 'Chromium', version: '141' }] }, configurable: true });
+    expect(tools()).toEqual([]);
+    Object.defineProperty(navigator, 'userAgentData', { value: { brands: [] }, configurable: true });
+    expect(tools()).toEqual(['puppeteer']);
+  });
+
+  test('Playwright 1.53+: its binding controller, __pw names, an exposed wrapper; HeadlessChrome brands and DOM automation', () => {
+    w.__playwright__binding__controller__ = {};
+    expect(tools()).toEqual(['playwright']);
+    delete w.__playwright__binding__controller__;
+    w.__pwClock = {};
+    expect(tools()).toEqual(['playwright']);
+    delete w.__pwClock;
+    w.__pw_recorderState = () => {};
+    expect(tools()).toEqual(['playwright']);
+    delete w.__pw_recorderState;
+    // On a sign-in page "pw" is the password: a page's own globals are not Playwright's.
+    w.__pwStrength = {};
+    w.__pw_reset = () => {};
+    expect(tools()).toEqual([]);
+    delete w.__pwStrength;
+    delete w.__pw_reset;
+    w.exposedPw = function exposedPw() { throw new Error('exposeBindingHandle supports a single argument'); };
+    expect(tools()).toEqual(['playwright']);
+    delete w.exposedPw;
+    Object.defineProperty(navigator, 'userAgentData', { value: { brands: [{ brand: 'HeadlessChrome', version: '141' }] }, configurable: true });
+    w.domAutomationController = {};
+    expect(tools()).toEqual(['headless_chrome']);
+  });
+
+  test("a driver's evaluate on the stack", () => {
+    expect(stackTools('Error\n    at check (https://cdn.touchque.com/device/v3.2.0/script.js:1:2)\n    at pptr:evaluate;Page.evaluate%20(file.js%3A3%3A9):3:10')).toEqual(['puppeteer']);
+    expect(stackTools('Error\n    at onSubmit (app.js:1:1)\n    at UtilityScript.evaluate (<anonymous>:290:30)')).toEqual(['playwright']);
+    expect(stackTools('Error\n    at onSubmit (app.js:1:1)\n    at async UtilityScript.evaluate (<anonymous>:290:30)')).toEqual(['playwright']);
+    expect(stackTools('Error\n    at onSubmit (https://www.example.com/app.js:1:1)')).toEqual([]);
+    // A page's own class of that name runs from its script's URL.
+    expect(stackTools('Error\n    at UtilityScript.submit (https://www.example.com/app.js:9:3)')).toEqual([]);
+  });
+
+  test('the DevTools probe runs only through a console that is the browser\'s own (jsdom\'s is written in JavaScript)', () => {
+    const debug = vi.spyOn(console, 'debug');
+    expect(automationFindings(window)).not.toContain('cdp');
+    expect(debug).not.toHaveBeenCalled();
+  });
+
+  test('the report puts what the page watchers saw in s.auto too', async () => {
+    w.__claudeElementMap = new Map();
+    const r = await buildDeviceRiskReport({ purpose: 'sign_in', browserKey: null });
+    expect(JSON.parse(r.body).s.auto).toContain('claude_agent');
+  });
+});
+
+describe('the DevTools protocol probe (3.2.0)', () => {
+  const probe = (debug: (e: Error) => void) => cdpAttached({ console: { debug }, Error } as unknown as Window);
+
+  test('the inspector builds the logged error\'s stack, or reads its name again: attached; Error.prepareStackTrace is as it was', () => {
+    const before = Object.getOwnPropertyDescriptor(Error, 'prepareStackTrace');
+    expect(probe((e) => { void e.stack; })).toBe(true);
+    expect(probe((e) => { void String(e); void e.name; void e.name; })).toBe(true);
+    expect(Object.getOwnPropertyDescriptor(Error, 'prepareStackTrace')).toEqual(before);
+  });
+
+  test('a console alone (it reads the name once), a silent one, or none: not attached', () => {
+    expect(probe((e) => { void String(e); })).toBe(false);
+    expect(probe(() => {})).toBe(false);
+    expect(cdpAttached({ Error } as unknown as Window)).toBe(false);
+  });
+
+  test('other errors the page formats meanwhile keep their stack', () => {
+    let other = '';
+    expect(probe(() => { other = String(new Error('mine').stack); })).toBe(false);
+    expect(other).toMatch(/^Error: mine\n\s+at /);
+  });
+});
+
+describe('late evidence (3.2.0)', () => {
+  const SITE_KEY = `tqpk_${'b'.repeat(32)}`;
+  const API = 'https://api.example.com';
+
+  function touchque(lateStatus = 202) {
+    const calls: Array<{ url: string; init: RequestInit; body: Record<string, unknown> }> = [];
+    const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      calls.push({ url, init, body });
+      if (body.challenge) return { ok: true, status: 200, json: async () => ({ challenge: 'ch1.1.x.y' }) };
+      if (body.late) return { ok: lateStatus < 300, status: lateStatus, json: async () => (lateStatus < 300 ? { ok: true } : { code: 'late_expired' }) };
+      return { ok: true, status: 200, json: async () => ({ visitorId: 'tqv_x', requestId: 'dre_late', confidence: 0.9 }) };
+    });
+    return { fetch: fetchMock as unknown as typeof fetch, lates: () => calls.filter((c) => c.body.late) };
+  }
+  const identify = (server: ReturnType<typeof touchque>, apiBaseUrl = API) => {
+    const risk = createDeviceRisk();
+    return risk.identify({ siteKey: SITE_KEY, purpose: 'sign_in', browserKey: null, apiBaseUrl, fetch: server.fetch }).then((id) => ({ risk, id }));
+  };
+
+  beforeEach(() => {
+    stopAgentMarks(window);
+    startAgentMarks(window);
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    stopAgentMarks(window);
+    delete (navigator as unknown as Record<string, unknown>).sendBeacon;
+  });
+
+  test('what the page finds after the identification goes to it once, in one update per burst; what its report had does not', async () => {
+    const server = touchque();
+    addPageMark(window, 'insert_text_bulk');
+    const { id } = await identify(server);
+    expect(id?.requestId).toBe('dre_late');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(server.lates()).toEqual([]);
+    addPageMark(window, 'cdp_input');
+    await vi.advanceTimersByTimeAsync(100);
+    addPageMark(window, 'input_no_focus');
+    addPageMark(window, 'not_a_late_code');
+    await vi.advanceTimersByTimeAsync(299);
+    expect(server.lates()).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(server.lates()).toHaveLength(1);
+    const [late] = server.lates();
+    expect(late.url).toBe(`${API}/device-risk/identify`);
+    expect(late.body).toEqual({ siteKey: SITE_KEY, requestId: 'dre_late', late: { auto: ['cdp_input', 'input_no_focus'] } });
+    expect((late.init.headers as Record<string, string>)['Content-Type']).toBe('text/plain');
+    expect(late.init).toMatchObject({ method: 'POST', credentials: 'same-origin', keepalive: true });
+  });
+
+  test(`at most ${LATE_MAX_UPDATES} updates per identification`, async () => {
+    const server = touchque();
+    const { risk } = await identify(server);
+    for (const code of ['claude_agent', 'comet_agent', 'genspark_agent', 'browser_use', 'stagehand', 'skyvern', 'puppeteer']) {
+      addPageMark(window, code);
+      await vi.advanceTimersByTimeAsync(300);
+    }
+    risk.flush();
+    await vi.advanceTimersByTimeAsync(300);
+    expect(server.lates().map((c) => (c.body.late as { auto: string[] }).auto)).toEqual([['claude_agent'], ['comet_agent'], ['genspark_agent'], ['browser_use'], ['stagehand']]);
+  });
+
+  test('at a submit: a beacon to the page\'s own origin (first-party proxy), with what was still waiting', async () => {
+    const server = touchque();
+    const beacon = vi.fn(() => true);
+    Object.defineProperty(navigator, 'sendBeacon', { value: beacon, configurable: true });
+    const { risk } = await identify(server, window.location.origin);
+    addPageMark(window, 'scripted_click');
+    risk.flush();
+    expect(beacon).toHaveBeenCalledTimes(1);
+    const [url, body] = beacon.mock.calls[0] as unknown as [string, string];
+    expect(url).toBe(`${window.location.origin}/device-risk/identify`);
+    expect(JSON.parse(body)).toEqual({ siteKey: SITE_KEY, requestId: 'dre_late', late: { auto: ['scripted_click'] } });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(server.lates()).toEqual([]);
+  });
+
+  test('at a submit to api.touchque.com: fetch with keepalive and no cookie (a beacon always sends them)', async () => {
+    const server = touchque();
+    const beacon = vi.fn(() => true);
+    Object.defineProperty(navigator, 'sendBeacon', { value: beacon, configurable: true });
+    const { risk } = await identify(server);
+    addPageMark(window, 'scripted_click');
+    risk.flush();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(beacon).not.toHaveBeenCalled();
+    expect(server.lates()).toHaveLength(1);
+    expect(server.lates()[0].init).toMatchObject({ keepalive: true, credentials: 'same-origin' });
+  });
+
+  test('a refusal is final (an expired or unknown identification); no identification, nothing sent', async () => {
+    const server = touchque(410);
+    await identify(server);
+    addPageMark(window, 'cdp_input');
+    await vi.advanceTimersByTimeAsync(300);
+    addPageMark(window, 'insert_text_bulk');
+    await vi.advanceTimersByTimeAsync(300);
+    expect(server.lates()).toHaveLength(1);
+
+    const none = touchque();
+    const risk = createDeviceRisk();
+    addPageMark(window, 'skyvern');
+    risk.flush();
+    await vi.advanceTimersByTimeAsync(300);
+    expect(none.lates()).toEqual([]);
+  });
+});
+
 describe('traits that cannot all be true (anti-detect browsers, emulators, phones that are desktops)', () => {
   const IPHONE = { os: 'iOS', br: 'Safari', pf: 'iPhone', scr: '852x393', dpr: 3, tp: 5, gpu: 'Apple Inc.|Apple GPU' };
   const ANDROID = { os: 'Android', br: 'Chrome', pf: 'Linux armv81', scr: '915x412', dpr: 2.625, tp: 5, gpu: 'ARM|Mali-G68' };
@@ -297,7 +510,7 @@ describe('traits that cannot all be true (anti-detect browsers, emulators, phone
     expect(vmFindings(safari, 'Apple|Apple M5')).not.toContain('headless_window');
     const plain = await createDeviceRisk().collect({ purpose: 'sign_in', browserKey: null, encrypt: false, challenge: 'ch1.1.x.y' });
     const body = JSON.parse(JSON.parse(Buffer.from(plain, 'base64url').toString('utf8')).body);
-    expect(body).toMatchObject({ ch: 'ch1.1.x.y', tv: '3.1.0' });
+    expect(body).toMatchObject({ ch: 'ch1.1.x.y', tv: '3.2.0' });
   });
 });
 

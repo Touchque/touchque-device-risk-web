@@ -3,6 +3,53 @@
 All notable changes to this project will be documented in this file. The
 format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.2.0] — 2026-11-25
+
+### Added
+- **AI agents on the page**, in `s.auto`: the Claude app's browser (`__claudeElementMap` and its three siblings, which
+  it adds when it first reads the page) and Claude in Chrome (`[id^="claude-agent-"]`) as `claude_agent`, Perplexity
+  Comet (`[id^="pplx-agent"]`) `comet_agent`, Genspark (`#genspark-float-bar`) `genspark_agent`, Browser Use (its
+  interaction highlight) `browser_use`, Stagehand (`#__v3_cursor_overlay__`) `stagehand`, Skyvern
+  (`GlobalSkyvernFrameIndex`, `<skyvern-control-indicator>`) `skyvern`. `deviceRisk` / `createDeviceRisk` start the
+  watchers once per window: the globals are looked up every 250 ms for 10 s, then every second for 15 minutes, and at
+  every report; overlays added to `<html>`, `<head>` and `<body>` are seen as they come.
+- **Input only software sends**, in `s.auto`: `cdp_input` (a mouse press or drag with no pressure: the DevTools
+  protocol sends force 0, a real mouse 0.5; Chromium only), `input_no_focus` (a press, key or input into a page on
+  screen that is still not focused 100 ms later), `insert_text_bulk` (text of more than one character in one piece,
+  announced by the browser, with no key just before and no IME composing), and from the script tag `scripted_click` (a
+  form sent with no press, tap or key from the person since the page loaded; a press into one of the page's frames,
+  such as a captcha box or a password manager's menu, counts as the person's). `input_no_focus` and
+  `insert_text_bulk` are for desktops only: a phone's keyboard puts whole words and codes in with no key (QuickType,
+  the code from Messages, an email suggestion), and a tap moves focus only when the finger lifts. Never a key, a
+  character or a position.
+- **Late evidence.** An agent reads a page before it acts, so most of this comes after the identification made on
+  load. After `identify` succeeds, new codes go to that identification:
+  `POST /device-risk/identify { siteKey, requestId, late: { auto } }` (text/plain, codes only, one update per 300 ms
+  burst, at most 5 per identification, for 15 minutes). When a form is sent the tag checks once more and sends what is
+  new at once (`deviceRisk.flush()`): a beacon to your own `/_tq/` origin; to `api.touchque.com` a keepalive fetch,
+  which, like `identify`, sends no cookie. The form field keeps its format.
+- Puppeteer is named (`puppeteer`): its `exposeFunction` binding (`puppeteer_*`) and wrapper, its 800x600 viewport with
+  the empty brands `setUserAgent` leaves, a `pptr:` evaluate on the stack. Playwright 1.53+, which adds no global by
+  default: `__playwright__binding__controller__`, its exact `__pw` names (`__pwClock`, `__pwWebSocketBinding`,
+  `__pwWebAuthnBinding`, `__pwSnapshotGlobals`, the recorder's `__pw_recorder*`; never a bare `__pw` prefix, which on
+  a sign-in page is often the password), its exposed wrappers, a `UtilityScript` evaluate (code with no URL) on the
+  stack, its `x-pw-*` glass pane on `<html>`.
+- `headless_chrome` also from the `HeadlessChrome` brand and Chrome's DOM automation globals.
+- `pageMarks`, `onPageMarks` and `LATE_EVIDENCE_CODES` are exported.
+
+### Fixed
+- `cdp` fires again. Chrome 137+ no longer runs a logged error's own `stack` getter, so the old probe never did. The
+  new one asks whether the inspector built a logged error's stack (`Error.prepareStackTrace`) or read its name more
+  often than the console alone does. It logs through a fresh blank frame's console at the debug level (hidden by
+  default), so the page's Sentry, Datadog or LogRocket wrappers neither swallow nor trigger it, and only while that
+  console is the browser's own (an extension's logger in every frame could read the error itself); V8 only,
+  everything restored and the frame removed. Checked on Chrome 158: quiet with nothing attached (the name read once
+  per log), on under Puppeteer.
+
+### Changed
+- `DEVICE_TAG_VERSION` is `3.2.0`. A report can now name more than 10 automation codes: Touchque's server takes 20
+  before pages move to 3.2.
+
 ## [3.1.0] — 2026-11-25
 
 ### Added

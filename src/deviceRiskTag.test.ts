@@ -5,6 +5,7 @@ import {
 } from './deviceRiskTag';
 import type { DeviceRiskIdentifyOptions } from './deviceRisk';
 import { setTouchqueLogger } from './log';
+import { pageMarks, startAgentMarks, stopAgentMarks } from './agentMarks';
 
 const SITE_KEY = `tqpk_${'a'.repeat(32)}`;
 
@@ -146,6 +147,33 @@ describe('the Device risk script tag', () => {
     device = installDeviceRiskTag({ siteKey: SITE_KEY }, { deviceRisk: fakeRisk(), pointer: null, input });
     await device.ready;
     expect(device.value()).toBe('dre_sign_in_1');
+  });
+
+  test('a form sent with no press, tap or key from the person: scripted_click; what the page found goes at once (3.2.0)', async () => {
+    document.body.innerHTML = '<form><input name="email"><button>Go</button></form>';
+    // The test's events stand for the person's own.
+    stopAgentMarks(window);
+    startAgentMarks(window, { trusted: () => true });
+    try {
+      const risk = { ...fakeRisk(), flush: vi.fn() };
+      device = installDeviceRiskTag({ siteKey: SITE_KEY }, { deviceRisk: risk, pointer: null });
+      await device.ready;
+      const form = document.querySelector('form')!;
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      expect(pageMarks(window)).toContain('scripted_click');
+      expect(risk.flush).toHaveBeenCalledTimes(1);
+      // The field keeps its format: the requestId (and the summaries when on).
+      expect(field(form)?.value).toBe('dre_sign_in_1');
+
+      stopAgentMarks(window);
+      startAgentMarks(window, { trusted: () => true });
+      form.querySelector('input')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      expect(pageMarks(window)).not.toContain('scripted_click');
+      expect(risk.flush).toHaveBeenCalledTimes(2);
+    } finally {
+      stopAgentMarks(window);
+    }
   });
 
   test('Touchque unreachable: ready is null, the field is empty, the page goes on', async () => {
